@@ -42,7 +42,7 @@ export class GameScene extends Phaser.Scene {
   private overlayGraphics: Phaser.GameObjects.Graphics | null = null;
   private freezeTimerMs = 0;
   private lastMovementScore = 0;
-  private redLightDurationMs = 3000;
+  private redLightDurationMs = gameConfig.redLightDurationMs;
   private greenLightDurationMs = 0;
   private lastPoseUpdateMs = 0;
   private stateChangedAtMs = 0;

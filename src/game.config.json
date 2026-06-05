@@ -1,3 +1,4 @@
 {
-  "motionThreshold": 1.00
+  "motionThreshold": 5.00,
+  "redLightDurationMs": 3000
 }
