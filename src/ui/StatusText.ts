@@ -3,8 +3,8 @@ import Phaser from "phaser";
 export class StatusText {
   private readonly titleText: Phaser.GameObjects.Text;
   private readonly centerText: Phaser.GameObjects.Text;
-  private readonly movementText: Phaser.GameObjects.Text;
-  private readonly freezeTimerText: Phaser.GameObjects.Text;
+  private readonly matchText: Phaser.GameObjects.Text;
+  private readonly holdTimerText: Phaser.GameObjects.Text;
 
   constructor(scene: Phaser.Scene, width: number, height: number) {
     this.titleText = scene.add
@@ -13,7 +13,7 @@ export class StatusText {
         fontSize: "40px",
         color: "#f7d047",
         stroke: "#1f1600",
-        strokeThickness: 5
+        strokeThickness: 5,
       })
       .setOrigin(0.5, 0)
       .setDepth(20);
@@ -25,29 +25,29 @@ export class StatusText {
         color: "#ffffff",
         stroke: "#101010",
         strokeThickness: 6,
-        align: "center"
+        align: "center",
       })
       .setOrigin(0.5)
       .setDepth(20);
 
-    this.movementText = scene.add
-      .text(width / 2, height - 62, "Movement Score: 0.000", {
+    this.matchText = scene.add
+      .text(width / 2, height - 62, "Match: 0%", {
         fontFamily: "Consolas",
         fontSize: "28px",
         color: "#b7d7ff",
         stroke: "#101010",
-        strokeThickness: 4
+        strokeThickness: 4,
       })
       .setOrigin(0.5)
       .setDepth(20);
 
-    this.freezeTimerText = scene.add
-      .text(width / 2, height - 28, "Freeze Time: 0.0 / 3.0 sec", {
+    this.holdTimerText = scene.add
+      .text(width / 2, height - 28, "Hold: 0.0 / 3.0 sec", {
         fontFamily: "Consolas",
         fontSize: "24px",
         color: "#d6ebff",
         stroke: "#101010",
-        strokeThickness: 4
+        strokeThickness: 4,
       })
       .setOrigin(0.5)
       .setDepth(20);
@@ -58,11 +58,11 @@ export class StatusText {
     this.centerText.setColor(color);
   }
 
-  public setMovementScore(score: number): void {
-    this.movementText.setText(`Movement Score: ${score.toFixed(3)}`);
+  public setMatchScore(score: number): void {
+    this.matchText.setText(`Match: ${Math.round(score * 100)}%`);
   }
 
-  public setFreezeTime(seconds: number): void {
-    this.freezeTimerText.setText(`Freeze Time: ${seconds.toFixed(1)} / 3.0 sec`);
+  public setHoldTime(seconds: number, totalSec = 3): void {
+    this.holdTimerText.setText(`Hold: ${seconds.toFixed(1)} / ${totalSec.toFixed(1)} sec`);
   }
 }
