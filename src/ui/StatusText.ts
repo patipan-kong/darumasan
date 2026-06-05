@@ -1,16 +1,17 @@
 import Phaser from "phaser";
 
 export class StatusText {
-  private readonly titleText: Phaser.GameObjects.Text;
   private readonly centerText: Phaser.GameObjects.Text;
   private readonly matchText: Phaser.GameObjects.Text;
   private readonly movementText: Phaser.GameObjects.Text;
   private readonly holdTimerText: Phaser.GameObjects.Text;
   private readonly freezeStatusText: Phaser.GameObjects.Text;
   private readonly debugText: Phaser.GameObjects.Text;
+  private readonly modeText: Phaser.GameObjects.Text;
+  private readonly lowerBodyWarningText: Phaser.GameObjects.Text;
 
   constructor(scene: Phaser.Scene, width: number, height: number) {
-    this.titleText = scene.add
+    scene.add
       .text(width / 2, 24, "AI DARUMA", {
         fontFamily: "Trebuchet MS",
         fontSize: "40px",
@@ -19,6 +20,17 @@ export class StatusText {
         strokeThickness: 5,
       })
       .setOrigin(0.5, 0)
+      .setDepth(20);
+
+    this.modeText = scene.add
+      .text(width - 18, 24, "FULL BODY", {
+        fontFamily: "Consolas",
+        fontSize: "18px",
+        color: "#4dffb8",
+        stroke: "#101010",
+        strokeThickness: 3,
+      })
+      .setOrigin(1, 0)
       .setDepth(20);
 
     this.centerText = scene.add
@@ -32,6 +44,19 @@ export class StatusText {
       })
       .setOrigin(0.5)
       .setDepth(20);
+
+    this.lowerBodyWarningText = scene.add
+      .text(width / 2, height / 2 + 72, "", {
+        fontFamily: "Trebuchet MS",
+        fontSize: "20px",
+        color: "#ffcc44",
+        stroke: "#101010",
+        strokeThickness: 4,
+        align: "center",
+      })
+      .setOrigin(0.5)
+      .setDepth(20)
+      .setVisible(false);
 
     this.matchText = scene.add
       .text(width / 2, height - 62, "Match: 0%", {
@@ -111,10 +136,23 @@ export class StatusText {
     this.freezeStatusText.setColor(isFoul ? "#ff7b7b" : "#aef7c1");
   }
 
-  public setDebugMetrics(visibleJointCount: number, usedJointCount: number, isReliable: boolean): void {
+  public setDebugMetrics(visibleJointCount: number, usedJointCount: number, totalJoints: number, isReliable: boolean): void {
     this.debugText.setText(
-      `Visible: ${visibleJointCount}/12 | Used: ${usedJointCount}/12 | Reliable: ${isReliable ? "YES" : "NO"}`
+      `Visible: ${visibleJointCount}/${totalJoints} | Used: ${usedJointCount}/${totalJoints} | Reliable: ${isReliable ? "YES" : "NO"}`
     );
     this.debugText.setColor(isReliable ? "#b4f7c8" : "#ffd08a");
+  }
+
+  public setMode(label: string, isUpperBody: boolean): void {
+    this.modeText.setText(label);
+    this.modeText.setColor(isUpperBody ? "#ffcc44" : "#4dffb8");
+  }
+
+  public setLowerBodyWarning(message: string): void {
+    if (message) {
+      this.lowerBodyWarningText.setText(message).setVisible(true);
+    } else {
+      this.lowerBodyWarningText.setVisible(false);
+    }
   }
 }

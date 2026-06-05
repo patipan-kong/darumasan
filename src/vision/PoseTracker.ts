@@ -49,7 +49,8 @@ export class PoseTracker {
     this.lastLandmarks = detected.map((point) => ({
       x: point.x,
       y: point.y,
-      z: point.z
+      z: point.z,
+      visibility: point.visibility,
     }));
 
     return this.lastLandmarks;

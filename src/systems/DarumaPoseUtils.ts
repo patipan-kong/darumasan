@@ -10,10 +10,18 @@ export interface Vec2 {
   y: number;
 }
 
+export type BodyMode = 'full_body' | 'upper_body';
+
 export const CORE_LANDMARK_IDS = [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28] as const;
+export const UPPER_BODY_LANDMARK_IDS = [11, 12, 13, 14, 15, 16] as const;
+export const LOWER_BODY_LANDMARK_IDS = [25, 26, 27, 28] as const;
 
 export type CoreLandmarkId = (typeof CORE_LANDMARK_IDS)[number];
 export type NormalizedPose = Partial<Record<CoreLandmarkId, Vec2>>;
+
+export function getActiveJointIds(mode: BodyMode): readonly CoreLandmarkId[] {
+  return mode === 'upper_body' ? UPPER_BODY_LANDMARK_IDS : CORE_LANDMARK_IDS;
+}
 
 export interface NormalizePoseResult {
   pose: NormalizedPose;
@@ -56,6 +64,7 @@ export interface FreezeDetectionOptions {
   movementThreshold?: number;
   holdDurationMs?: number;
   poseMatched?: boolean;
+  mode?: BodyMode;
 }
 
 const MIN_VISIBILITY = 0.5;
@@ -68,7 +77,6 @@ let freezeHoldTimerMs = 0;
 
 function isLandmarkVisible(lm: InputLandmark | undefined): lm is InputLandmark {
   if (!lm) return false;
-  // ถ้าไม่มีค่า visibility จาก MediaPipe ให้ถือว่าใช้ได้ (บางรุ่น/model ไม่ส่งฟิลด์นี้)
   return lm.visibility === undefined || lm.visibility >= MIN_VISIBILITY;
 }
 
@@ -76,7 +84,6 @@ function toReferenceMap(referencePose: ReferencePoseObject): Partial<Record<Core
   const map: Partial<Record<CoreLandmarkId, Vec2>> = {};
 
   if (Array.isArray(referencePose.joints)) {
-    // รองรับโครงสร้างเดิมในโปรเจกต์: joints เป็น array เรียงตาม CORE_LANDMARK_IDS
     for (let i = 0; i < CORE_LANDMARK_IDS.length; i += 1) {
       const id = CORE_LANDMARK_IDS[i];
       const p = referencePose.joints[i];
@@ -86,7 +93,6 @@ function toReferenceMap(referencePose: ReferencePoseObject): Partial<Record<Core
     return map;
   }
 
-  // รองรับโครงสร้างตามที่ผู้ใช้ยกตัวอย่าง: joints เป็น object key ตาม landmark id
   for (const id of CORE_LANDMARK_IDS) {
     const point = referencePose.joints[id];
     if (!point) continue;
@@ -96,6 +102,7 @@ function toReferenceMap(referencePose: ReferencePoseObject): Partial<Record<Core
   return map;
 }
 
+// Normalize reference using hip midpoint as origin (full body mode)
 function toBodyNormalizedReference(referencePose: ReferencePoseObject): Partial<Record<CoreLandmarkId, Vec2>> {
   const raw = toReferenceMap(referencePose);
   const leftShoulder = raw[11];
@@ -129,41 +136,108 @@ function toBodyNormalizedReference(referencePose: ReferencePoseObject): Partial<
   return normalized;
 }
 
+// Normalize reference using shoulder midpoint as origin (upper body mode)
+function toBodyNormalizedReferenceUpperBody(referencePose: ReferencePoseObject): Partial<Record<CoreLandmarkId, Vec2>> {
+  const raw = toReferenceMap(referencePose);
+  const leftShoulder = raw[11];
+  const rightShoulder = raw[12];
+
+  if (!leftShoulder || !rightShoulder) {
+    return raw;
+  }
+
+  const shoulderMidX = (leftShoulder.x + rightShoulder.x) / 2;
+  const shoulderMidY = (leftShoulder.y + rightShoulder.y) / 2;
+  const shoulderWidth = Math.hypot(rightShoulder.x - leftShoulder.x, rightShoulder.y - leftShoulder.y);
+
+  if (shoulderWidth < 1e-5) {
+    return raw;
+  }
+
+  const normalized: Partial<Record<CoreLandmarkId, Vec2>> = {};
+  for (const id of UPPER_BODY_LANDMARK_IDS) {
+    const point = raw[id];
+    if (!point) continue;
+
+    normalized[id] = {
+      x: (shoulderMidX - point.x) / shoulderWidth,
+      y: (shoulderMidY - point.y) / shoulderWidth
+    };
+  }
+
+  return normalized;
+}
+
 /**
- * แปลงพิกัด MediaPipe (0..1) ให้เป็นพิกัดแบบ Body-Normalized
- * - ย้าย origin ไปที่จุดกึ่งกลางสะโพก (23,24)
- * - ใช้ความกว้างหัวไหล่ (11-12) เป็น scale
- * - แปลงแกน y ให้ "ค่ามาก = สูงขึ้น" เพื่อคำนวณท่าง่ายขึ้น
+ * Convert MediaPipe coordinates (0..1) to body-normalized coordinates.
+ * Full body: hip midpoint as origin, shoulder width as scale.
+ * Upper body: shoulder midpoint as origin, shoulder width as scale (works seated).
  */
-export function normalizePose(currentLandmarks: InputLandmark[]): NormalizePoseResult {
+export function normalizePose(currentLandmarks: InputLandmark[], mode: BodyMode = 'full_body'): NormalizePoseResult {
   const missingJointIds: CoreLandmarkId[] = [];
   const normalized: NormalizedPose = {};
 
   const leftShoulder = currentLandmarks[11];
   const rightShoulder = currentLandmarks[12];
+
+  if (!isLandmarkVisible(leftShoulder)) missingJointIds.push(11);
+  if (!isLandmarkVisible(rightShoulder)) missingJointIds.push(12);
+
+  if (mode === 'upper_body') {
+    if (missingJointIds.length > 0) {
+      return { pose: normalized, visibleJointCount: 0, missingJointIds, isReliable: false };
+    }
+
+    const shoulderMidX = (leftShoulder.x + rightShoulder.x) / 2;
+    const shoulderMidY = (leftShoulder.y + rightShoulder.y) / 2;
+    const shoulderWidth = Math.hypot(rightShoulder.x - leftShoulder.x, rightShoulder.y - leftShoulder.y);
+
+    if (shoulderWidth < 1e-5) {
+      return {
+        pose: normalized,
+        visibleJointCount: 0,
+        missingJointIds: [...missingJointIds, ...UPPER_BODY_LANDMARK_IDS],
+        isReliable: false
+      };
+    }
+
+    let visibleJointCount = 0;
+    for (const id of UPPER_BODY_LANDMARK_IDS) {
+      const lm = currentLandmarks[id];
+      if (!isLandmarkVisible(lm)) {
+        missingJointIds.push(id);
+        continue;
+      }
+      normalized[id] = {
+        x: (shoulderMidX - lm.x) / shoulderWidth,
+        y: (shoulderMidY - lm.y) / shoulderWidth
+      };
+      visibleJointCount += 1;
+    }
+
+    return {
+      pose: normalized,
+      visibleJointCount,
+      missingJointIds,
+      isReliable: visibleJointCount >= 4
+    };
+  }
+
+  // Full body mode
   const leftHip = currentLandmarks[23];
   const rightHip = currentLandmarks[24];
 
-  // 4 จุดหลักต้องเห็นชัดพอ ไม่งั้น normalize จะเพี้ยน
-  if (!isLandmarkVisible(leftShoulder)) missingJointIds.push(11);
-  if (!isLandmarkVisible(rightShoulder)) missingJointIds.push(12);
   if (!isLandmarkVisible(leftHip)) missingJointIds.push(23);
   if (!isLandmarkVisible(rightHip)) missingJointIds.push(24);
 
   if (missingJointIds.length > 0) {
-    return {
-      pose: normalized,
-      visibleJointCount: 0,
-      missingJointIds,
-      isReliable: false
-    };
+    return { pose: normalized, visibleJointCount: 0, missingJointIds, isReliable: false };
   }
 
   const hipMidX = (leftHip.x + rightHip.x) / 2;
   const hipMidY = (leftHip.y + rightHip.y) / 2;
   const shoulderWidth = Math.hypot(rightShoulder.x - leftShoulder.x, rightShoulder.y - leftShoulder.y);
 
-  // กันหารศูนย์/ท่ากลายเป็นเส้นเดียวจาก noise
   if (shoulderWidth < 1e-5) {
     return {
       pose: normalized,
@@ -197,21 +271,26 @@ export function normalizePose(currentLandmarks: InputLandmark[]): NormalizePoseR
 }
 
 /**
- * ตรวจว่าท่าผู้เล่นใกล้เคียงท่าอ้างอิงแค่ไหน
- * - วัด Euclidean distance รายจุดในระนาบ x,y
- * - เติม rule-based fallback เพื่อให้เล่นง่ายขึ้นในโลกจริง
+ * Compare player pose against reference using only the joints active for the given mode.
+ * Upper body mode uses shoulder-midpoint normalization; full body uses hip-midpoint.
  */
 export function checkPoseMatch(
   normalizedPlayerPose: NormalizedPose,
   referencePose: ReferencePoseObject,
-  passThresholdPercent = DEFAULT_POSE_PASS_THRESHOLD_PERCENT
+  passThresholdPercent = DEFAULT_POSE_PASS_THRESHOLD_PERCENT,
+  mode: BodyMode = 'full_body'
 ): PoseMatchResult {
-  const refMap = toBodyNormalizedReference(referencePose);
+  const refMap = mode === 'upper_body'
+    ? toBodyNormalizedReferenceUpperBody(referencePose)
+    : toBodyNormalizedReference(referencePose);
+
+  const activeIds = getActiveJointIds(mode);
+  const minUsedJoints = mode === 'upper_body' ? 4 : 8;
 
   let totalDistance = 0;
   let usedJointCount = 0;
 
-  for (const id of CORE_LANDMARK_IDS) {
+  for (const id of activeIds) {
     const p = normalizedPlayerPose[id];
     const r = refMap[id];
     if (!p || !r) continue;
@@ -221,10 +300,9 @@ export function checkPoseMatch(
   }
 
   const averageDistance = usedJointCount > 0 ? totalDistance / usedJointCount : Number.POSITIVE_INFINITY;
-  // distanceScore: 1 = ตรงมาก, 0 = ต่างมาก
   const distanceScore = usedJointCount > 0 ? Math.max(0, 1 - averageDistance / 1.2) : 0;
 
-  // Fallback Rule #1: ข้อมือสูงกว่าไหล่ทั้งสองข้าง (หลัง normalize: y มากกว่า = สูงกว่า)
+  // Fallback Rule #1: Both wrists above shoulders (valid in both modes)
   const handsRaised = Boolean(
     normalizedPlayerPose[15] && normalizedPlayerPose[16] &&
     normalizedPlayerPose[11] && normalizedPlayerPose[12] &&
@@ -232,8 +310,8 @@ export function checkPoseMatch(
     normalizedPlayerPose[16]!.y > normalizedPlayerPose[12]!.y
   );
 
-  // Fallback Rule #2: ข้อเท้าขวาอยู่ซ้ายกว่าเข่าขวา (พับขาเข้าด้านใน)
-  const rightLegFoldedInward = Boolean(
+  // Fallback Rule #2: Right ankle inside right knee (lower body only, not valid in upper body mode)
+  const rightLegFoldedInward = mode === 'full_body' && Boolean(
     normalizedPlayerPose[28] && normalizedPlayerPose[26] &&
     normalizedPlayerPose[28]!.x < normalizedPlayerPose[26]!.x
   );
@@ -243,9 +321,7 @@ export function checkPoseMatch(
     (rightLegFoldedInward ? FALLBACK_BONUS_PER_RULE : 0);
 
   const percentage = Math.max(0, Math.min(100, Math.round((distanceScore + fallbackBonus) * 100)));
-
-  // ถ้ามีจุดใช้เทียบน้อยเกินไป ให้ไม่ผ่านแม้เปอร์เซ็นต์ดูสวย
-  const passed = usedJointCount >= 8 && percentage >= passThresholdPercent;
+  const passed = usedJointCount >= minUsedJoints && percentage >= passThresholdPercent;
 
   return {
     percentage,
@@ -262,15 +338,15 @@ export function checkPoseMatch(
 }
 
 /**
- * รีเซ็ตตัวนับการค้างท่า (ควรเรียกเมื่อเริ่มรอบใหม่)
+ * Reset the hold timer (call when starting a new round or switching modes).
  */
 export function resetFreezeTimer(): void {
   freezeHoldTimerMs = 0;
 }
 
 /**
- * ตรวจจับการขยับเฟรมต่อเฟรม + นับเวลาค้างท่า
- * เงื่อนไขชนะ: ท่าถูกต้อง + ขยับไม่เกิน threshold ต่อเนื่อง >= holdDurationMs
+ * Detect frame-to-frame movement and accumulate hold time.
+ * Only joints active for the given mode are compared.
  */
 export function checkFreezeDetection(
   currentPose: NormalizedPose,
@@ -281,6 +357,7 @@ export function checkFreezeDetection(
   const movementThreshold = options.movementThreshold ?? DEFAULT_MOVEMENT_THRESHOLD;
   const holdDurationMs = options.holdDurationMs ?? DEFAULT_HOLD_DURATION_MS;
   const poseMatched = options.poseMatched ?? true;
+  const activeIds = getActiveJointIds(options.mode ?? 'full_body');
 
   if (!previousPose) {
     if (!poseMatched) freezeHoldTimerMs = 0;
@@ -297,7 +374,7 @@ export function checkFreezeDetection(
 
   let totalDelta = 0;
   let comparedJointCount = 0;
-  for (const id of CORE_LANDMARK_IDS) {
+  for (const id of activeIds) {
     const curr = currentPose[id];
     const prev = previousPose[id];
     if (!curr || !prev) continue;
