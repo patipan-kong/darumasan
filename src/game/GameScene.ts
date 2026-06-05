@@ -49,7 +49,7 @@ export class GameScene extends Phaser.Scene {
   constructor() {
     super("GameScene");
     this.poseTracker = new PoseTracker();
-    this.motionDetector = new MotionDetector(0.015);
+    this.motionDetector = new MotionDetector(0.05);
   }
 
   public async create(): Promise<void> {

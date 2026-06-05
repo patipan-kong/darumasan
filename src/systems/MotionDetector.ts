@@ -9,11 +9,14 @@ export interface MotionResult {
   isStill: boolean;
 }
 
+const SMOOTHING_ALPHA = 0.2;
+
 export class MotionDetector {
   private readonly movementThreshold: number;
   private previousLandmarks: Landmark[] | null = null;
+  private smoothedScore = 0;
 
-  constructor(movementThreshold = 0.015) {
+  constructor(movementThreshold = 0.05) {
     this.movementThreshold = movementThreshold;
   }
 
@@ -23,24 +26,27 @@ export class MotionDetector {
       return { movementScore: 0, isStill: true };
     }
 
-    let movementScore = 0;
+    let rawScore = 0;
     for (let i = 0; i < landmarks.length; i += 1) {
       const prev = this.previousLandmarks[i];
       const curr = landmarks[i];
       const dx = curr.x - prev.x;
       const dy = curr.y - prev.y;
       const dz = curr.z - prev.z;
-      movementScore += Math.sqrt(dx * dx + dy * dy + dz * dz);
+      rawScore += Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
 
+    this.smoothedScore = SMOOTHING_ALPHA * rawScore + (1 - SMOOTHING_ALPHA) * this.smoothedScore;
     this.previousLandmarks = landmarks.map((point) => ({ ...point }));
+
     return {
-      movementScore,
-      isStill: movementScore < this.movementThreshold
+      movementScore: this.smoothedScore,
+      isStill: this.smoothedScore < this.movementThreshold
     };
   }
 
   public reset(): void {
     this.previousLandmarks = null;
+    this.smoothedScore = 0;
   }
 }
