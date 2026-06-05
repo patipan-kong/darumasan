@@ -11,6 +11,31 @@ export interface ReferencePose {
   joints: Vec2[];
 }
 
+export type JointId = 11 | 12 | 13 | 14 | 15 | 16 | 23 | 24 | 25 | 26 | 27 | 28;
+
+export type ReferencePoseMap = {
+  name: string;
+  joints: Record<JointId, Vec2>;
+};
+
+export const REFERENCE_POSE: ReferencePoseMap = {
+  name: "Y_POSE_STAND_LEFT_RAISE_RIGHT",
+  joints: {
+    11: { x: -0.20, y: 0.35 },
+    12: { x: 0.20, y: 0.35 },
+    13: { x: -0.40, y: 0.15 },
+    14: { x: 0.40, y: 0.15 },
+    15: { x: -0.55, y: -0.10 },
+    16: { x: 0.55, y: -0.10 },
+    23: { x: -0.15, y: 0.65 },
+    24: { x: 0.15, y: 0.65 },
+    25: { x: -0.15, y: 0.85 },
+    26: { x: 0.35, y: 0.75 },
+    27: { x: -0.15, y: 1.05 },
+    28: { x: 0.10, y: 0.80 }
+  }
+};
+
 export const REFERENCE_POSES: ReferencePose[] = [
   {
     name: "Y POSE",

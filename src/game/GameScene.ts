@@ -1,13 +1,23 @@
 import Phaser from "phaser";
 import type { Landmark } from "../systems/MotionDetector";
-import { PoseMatcher } from "../systems/PoseMatcher";
 import { StatusText } from "../ui/StatusText";
 import { PoseTracker } from "../vision/PoseTracker";
-import { REFERENCE_POSES } from "../data/poses";
-import type { ReferencePose } from "../data/poses";
+import { REFERENCE_POSE } from "../data/poses";
+import type { JointId } from "../data/poses";
+import {
+  checkFreezeDetection,
+  checkPoseMatch,
+  normalizePose,
+  resetFreezeTimer,
+  type FreezeDetectionResult,
+  type NormalizedPose,
+  type PoseMatchResult
+} from "../systems/DarumaPoseUtils";
 
-const POSE_MATCH_THRESHOLD = parseFloat(import.meta.env.VITE_POSE_MATCH_THRESHOLD ?? "0.65");
+const POSE_MATCH_THRESHOLD_PERCENT = parseFloat(import.meta.env.VITE_POSE_MATCH_THRESHOLD_PERCENT ?? "78");
 const HOLD_DURATION_MS = parseInt(import.meta.env.VITE_HOLD_DURATION_MS ?? "3000", 10);
+const MOVEMENT_THRESHOLD = parseFloat(import.meta.env.VITE_MOVEMENT_THRESHOLD ?? "0.045");
+const MOVEMENT_SMOOTHING_ALPHA = parseFloat(import.meta.env.VITE_MOVEMENT_SMOOTHING_ALPHA ?? "0.2");
 
 enum GameState {
   WAITING,
@@ -16,7 +26,7 @@ enum GameState {
   SUCCESS,
 }
 
-const CORE_LANDMARKS = [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28];
+const CORE_LANDMARKS = [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28] as const satisfies readonly JointId[];
 
 // Absolute landmark index pairs for drawing the player skeleton
 const PLAYER_CONNECTIONS: Array<[number, number]> = [
@@ -42,22 +52,32 @@ const CORE_CONNECTIONS: Array<[number, number]> = [
 
 export class GameScene extends Phaser.Scene {
   private poseTracker: PoseTracker;
-  private poseMatcher: PoseMatcher;
   private statusText: StatusText | null = null;
   private state: GameState = GameState.WAITING;
   private webcamTexture: Phaser.Textures.CanvasTexture | null = null;
   private webcamImage: Phaser.GameObjects.Image | null = null;
   private overlayGraphics: Phaser.GameObjects.Graphics | null = null;
-  private holdTimerMs = 0;
-  private lastMatchScore = 0;
-  private currentPoseIndex = 0;
+  private previousNormalizedPose: NormalizedPose | null = null;
+  private lastMatchPercent = 0;
+  private smoothedMovementScore = 0;
+  private lastVisibleJointCount = 0;
+  private lastUsedJointCount = 0;
+  private lastNormalizeReliable = false;
+  private lastFreezeResult: FreezeDetectionResult = {
+    movementScore: 0,
+    foul: false,
+    message: "",
+    holdTimeMs: 0,
+    holdProgress: 0,
+    passed: false,
+    comparedJointCount: 0
+  };
   private lastPoseUpdateMs = 0;
   private stateChangedAtMs = 0;
 
   constructor() {
     super("GameScene");
     this.poseTracker = new PoseTracker();
-    this.poseMatcher = new PoseMatcher();
   }
 
   public async create(): Promise<void> {
@@ -94,37 +114,101 @@ export class GameScene extends Phaser.Scene {
       this.lastPoseUpdateMs = time;
     }
 
-    const coreLandmarks = landmarks.length > 0
-      ? CORE_LANDMARKS.map(i => landmarks[i])
-      : [];
+    const hasPose = landmarks.length > 0;
+    let normalizeReliable = false;
+    let matchResult: PoseMatchResult = {
+      percentage: 0,
+      passed: false,
+      averageDistance: Number.POSITIVE_INFINITY,
+      distanceScore: 0,
+      fallbackBonus: 0,
+      usedJointCount: 0,
+      ruleChecks: {
+        handsRaised: false,
+        rightLegFoldedInward: false
+      }
+    };
 
-    const currentPose = REFERENCE_POSES[this.currentPoseIndex];
+    if (hasPose) {
+      const normalized = normalizePose(landmarks);
+      normalizeReliable = normalized.isReliable;
+      this.lastVisibleJointCount = normalized.visibleJointCount;
+      this.lastNormalizeReliable = normalizeReliable;
 
-    this.lastMatchScore = coreLandmarks.length > 0
-      ? this.poseMatcher.compare(coreLandmarks, currentPose.joints)
-      : 0;
+      if (normalizeReliable) {
+        matchResult = checkPoseMatch(normalized.pose, REFERENCE_POSE, POSE_MATCH_THRESHOLD_PERCENT);
+        this.lastUsedJointCount = matchResult.usedJointCount;
+        this.lastFreezeResult = checkFreezeDetection(normalized.pose, this.previousNormalizedPose, delta, {
+          poseMatched: matchResult.passed,
+          movementThreshold: MOVEMENT_THRESHOLD,
+          holdDurationMs: HOLD_DURATION_MS
+        });
+        this.previousNormalizedPose = normalized.pose;
+      } else {
+        resetFreezeTimer();
+        this.previousNormalizedPose = null;
+        this.lastUsedJointCount = 0;
+        this.lastFreezeResult = {
+          movementScore: 0,
+          foul: false,
+          message: "LANDMARK LOW VISIBILITY",
+          holdTimeMs: 0,
+          holdProgress: 0,
+          passed: false,
+          comparedJointCount: 0
+        };
+      }
+    } else {
+      resetFreezeTimer();
+      this.previousNormalizedPose = null;
+      this.lastVisibleJointCount = 0;
+      this.lastUsedJointCount = 0;
+      this.lastNormalizeReliable = false;
+      this.lastFreezeResult = {
+        movementScore: 0,
+        foul: false,
+        message: "NO POSE DETECTED",
+        holdTimeMs: 0,
+        holdProgress: 0,
+        passed: false,
+        comparedJointCount: 0
+      };
+    }
 
-    this.statusText.setMatchScore(this.lastMatchScore);
-    this.drawOverlay(landmarks, currentPose);
-    this.advanceStateMachine(time, delta, coreLandmarks.length > 0, currentPose);
+    this.lastMatchPercent = matchResult.percentage;
+    const rawMovement = Number.isFinite(this.lastFreezeResult.movementScore) ? this.lastFreezeResult.movementScore : 0;
+    this.smoothedMovementScore =
+      MOVEMENT_SMOOTHING_ALPHA * rawMovement +
+      (1 - MOVEMENT_SMOOTHING_ALPHA) * this.smoothedMovementScore;
+
+    this.statusText.setMatchScore(this.lastMatchPercent / 100);
+    this.statusText.setMovementScore(this.smoothedMovementScore);
+    this.statusText.setFreezeStatus(this.lastFreezeResult.message, this.lastFreezeResult.foul);
+    this.statusText.setDebugMetrics(this.lastVisibleJointCount, this.lastUsedJointCount, this.lastNormalizeReliable);
+    this.drawOverlay(landmarks);
+    this.advanceStateMachine(time, hasPose, normalizeReliable);
   }
 
-  private advanceStateMachine(
-    time: number,
-    delta: number,
-    hasPose: boolean,
-    pose: ReferencePose
-  ): void {
+  private advanceStateMachine(time: number, hasPose: boolean, normalizeReliable: boolean): void {
     if (!this.statusText) return;
-
-    const isMatching = this.lastMatchScore >= POSE_MATCH_THRESHOLD;
 
     if (!hasPose) {
       this.state = GameState.WAITING;
-      this.holdTimerMs = 0;
+      resetFreezeTimer();
       this.statusText.setCenterMessage("NO POSE DETECTED", "#ffd966");
       this.statusText.setHoldTime(0, HOLD_DURATION_MS / 1000);
       return;
+    }
+
+    if (!normalizeReliable) {
+      this.state = GameState.WAITING;
+      this.statusText.setCenterMessage("LOW VISIBILITY", "#ffd966");
+      this.statusText.setHoldTime(0, HOLD_DURATION_MS / 1000);
+      return;
+    }
+
+    if (this.lastFreezeResult.passed && this.state !== GameState.SUCCESS) {
+      this.enterSuccess(time);
     }
 
     switch (this.state) {
@@ -133,19 +217,18 @@ export class GameScene extends Phaser.Scene {
         break;
 
       case GameState.POSING:
-        this.statusText.setCenterMessage(`MATCH: ${pose.name}`, "#4dffb8");
+        this.statusText.setCenterMessage(`MATCH: ${REFERENCE_POSE.name}`, "#4dffb8");
         this.statusText.setHoldTime(0, HOLD_DURATION_MS / 1000);
-        if (isMatching) this.enterHolding(time);
+        if (this.lastMatchPercent >= POSE_MATCH_THRESHOLD_PERCENT) this.enterHolding(time);
         break;
 
       case GameState.HOLDING:
-        this.statusText.setCenterMessage("HOLD IT!", "#ffcc00");
-        if (isMatching) {
-          this.holdTimerMs += delta;
-          this.statusText.setHoldTime(this.holdTimerMs / 1000, HOLD_DURATION_MS / 1000);
-          if (this.holdTimerMs >= HOLD_DURATION_MS) this.enterSuccess(time);
-        } else {
+        if (this.lastFreezeResult.foul) {
+          this.statusText.setCenterMessage("MOVE DETECTED!", "#ff5f5f");
           this.enterPosing(time);
+        } else {
+          this.statusText.setCenterMessage("FREEZE!", "#ffcc00");
+          this.statusText.setHoldTime(this.lastFreezeResult.holdTimeMs / 1000, HOLD_DURATION_MS / 1000);
         }
         break;
 
@@ -153,7 +236,6 @@ export class GameScene extends Phaser.Scene {
         this.statusText.setCenterMessage("PERFECT!", "#7dff75");
         this.statusText.setHoldTime(HOLD_DURATION_MS / 1000, HOLD_DURATION_MS / 1000);
         if (time - this.stateChangedAtMs > 2000) {
-          this.currentPoseIndex = (this.currentPoseIndex + 1) % REFERENCE_POSES.length;
           this.enterPosing(time);
         }
         break;
@@ -163,13 +245,13 @@ export class GameScene extends Phaser.Scene {
   private enterPosing(time: number): void {
     this.state = GameState.POSING;
     this.stateChangedAtMs = time;
-    this.holdTimerMs = 0;
+    this.smoothedMovementScore = 0;
+    resetFreezeTimer();
   }
 
   private enterHolding(time: number): void {
     this.state = GameState.HOLDING;
     this.stateChangedAtMs = time;
-    this.holdTimerMs = 0;
   }
 
   private enterSuccess(time: number): void {
@@ -194,14 +276,14 @@ export class GameScene extends Phaser.Scene {
     this.webcamTexture.refresh();
   }
 
-  private drawOverlay(landmarks: Landmark[], pose: ReferencePose): void {
+  private drawOverlay(landmarks: Landmark[]): void {
     if (!this.overlayGraphics) return;
     this.overlayGraphics.clear();
-    this.drawReferenceSilhouette(pose);
+    this.drawReferenceSilhouette();
     if (landmarks.length > 0) this.drawPlayerSkeleton(landmarks);
   }
 
-  private drawReferenceSilhouette(pose: ReferencePose): void {
+  private drawReferenceSilhouette(): void {
     if (!this.overlayGraphics) return;
 
     const { width, height } = this.scale;
@@ -216,13 +298,21 @@ export class GameScene extends Phaser.Scene {
 
     this.overlayGraphics.lineStyle(5, 0xffffff, 0.28);
     for (const [a, b] of CORE_CONNECTIONS) {
-      const pa = toScreen(pose.joints[a]);
-      const pb = toScreen(pose.joints[b]);
+      const idA = CORE_LANDMARKS[a];
+      const idB = CORE_LANDMARKS[b];
+      const jointA = REFERENCE_POSE.joints[idA];
+      const jointB = REFERENCE_POSE.joints[idB];
+      if (!jointA || !jointB) continue;
+
+      const pa = toScreen(jointA);
+      const pb = toScreen(jointB);
       this.overlayGraphics.lineBetween(pa.x, pa.y, pb.x, pb.y);
     }
 
     this.overlayGraphics.fillStyle(0xffffff, 0.45);
-    for (const joint of pose.joints) {
+    for (const landmarkId of CORE_LANDMARKS) {
+      const joint = REFERENCE_POSE.joints[landmarkId];
+      if (!joint) continue;
       const p = toScreen(joint);
       this.overlayGraphics.fillCircle(p.x, p.y, 6);
     }
@@ -231,7 +321,7 @@ export class GameScene extends Phaser.Scene {
   private drawPlayerSkeleton(landmarks: Landmark[]): void {
     if (!this.overlayGraphics) return;
 
-    const color = this.lastMatchScore >= POSE_MATCH_THRESHOLD ? 0x3cff8e : 0x00b4ff;
+    const color = this.lastMatchPercent >= POSE_MATCH_THRESHOLD_PERCENT ? 0x3cff8e : 0x00b4ff;
     const { width, height } = this.scale;
 
     this.overlayGraphics.lineStyle(3, color, 0.9);
