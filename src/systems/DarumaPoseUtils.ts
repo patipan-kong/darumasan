@@ -96,6 +96,39 @@ function toReferenceMap(referencePose: ReferencePoseObject): Partial<Record<Core
   return map;
 }
 
+function toBodyNormalizedReference(referencePose: ReferencePoseObject): Partial<Record<CoreLandmarkId, Vec2>> {
+  const raw = toReferenceMap(referencePose);
+  const leftShoulder = raw[11];
+  const rightShoulder = raw[12];
+  const leftHip = raw[23];
+  const rightHip = raw[24];
+
+  if (!leftShoulder || !rightShoulder || !leftHip || !rightHip) {
+    return raw;
+  }
+
+  const hipMidX = (leftHip.x + rightHip.x) / 2;
+  const hipMidY = (leftHip.y + rightHip.y) / 2;
+  const shoulderWidth = Math.hypot(rightShoulder.x - leftShoulder.x, rightShoulder.y - leftShoulder.y);
+
+  if (shoulderWidth < 1e-5) {
+    return raw;
+  }
+
+  const normalized: Partial<Record<CoreLandmarkId, Vec2>> = {};
+  for (const id of CORE_LANDMARK_IDS) {
+    const point = raw[id];
+    if (!point) continue;
+
+    normalized[id] = {
+      x: (hipMidX - point.x) / shoulderWidth,
+      y: (hipMidY - point.y) / shoulderWidth
+    };
+  }
+
+  return normalized;
+}
+
 /**
  * แปลงพิกัด MediaPipe (0..1) ให้เป็นพิกัดแบบ Body-Normalized
  * - ย้าย origin ไปที่จุดกึ่งกลางสะโพก (23,24)
@@ -149,7 +182,7 @@ export function normalizePose(currentLandmarks: InputLandmark[]): NormalizePoseR
     }
 
     normalized[id] = {
-      x: (lm.x - hipMidX) / shoulderWidth,
+      x: (hipMidX - lm.x) / shoulderWidth,
       y: (hipMidY - lm.y) / shoulderWidth
     };
     visibleJointCount += 1;
@@ -173,7 +206,7 @@ export function checkPoseMatch(
   referencePose: ReferencePoseObject,
   passThresholdPercent = DEFAULT_POSE_PASS_THRESHOLD_PERCENT
 ): PoseMatchResult {
-  const refMap = toReferenceMap(referencePose);
+  const refMap = toBodyNormalizedReference(referencePose);
 
   let totalDistance = 0;
   let usedJointCount = 0;

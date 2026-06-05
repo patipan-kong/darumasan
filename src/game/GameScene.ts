@@ -288,12 +288,15 @@ export class GameScene extends Phaser.Scene {
 
     const { width, height } = this.scale;
     const cx = width / 2;
-    const cy = height * 0.54;
-    const scale = height * 0.22;
+    const leftHip = REFERENCE_POSE.joints[23];
+    const rightHip = REFERENCE_POSE.joints[24];
+    const refHipY = leftHip && rightHip ? (leftHip.y + rightHip.y) / 2 : 0.65;
+    const hipScreenY = height * 0.6;
+    const scale = height * 0.55;
 
     const toScreen = (j: { x: number; y: number }) => ({
       x: cx + j.x * scale,
-      y: cy - j.y * scale,
+      y: hipScreenY + (j.y - refHipY) * scale,
     });
 
     this.overlayGraphics.lineStyle(5, 0xffffff, 0.28);
