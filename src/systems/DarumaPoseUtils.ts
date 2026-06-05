@@ -338,6 +338,67 @@ export function checkPoseMatch(
 }
 
 /**
+ * Compare two already-normalized poses directly (no re-normalization step).
+ * Used by the self-match test: capturing the current pose as the reference and
+ * comparing the next frame against it should yield 95-100% with no movement.
+ *
+ * Because both sides are in the same coordinate space this is the ground-truth
+ * check for whether the distance/scoring math is correct.
+ */
+export function checkPoseMatchNormalized(
+  currentPose: NormalizedPose,
+  referencePose: NormalizedPose,
+  passThresholdPercent = DEFAULT_POSE_PASS_THRESHOLD_PERCENT,
+  mode: BodyMode = 'full_body'
+): PoseMatchResult {
+  const activeIds = getActiveJointIds(mode);
+  const minUsedJoints = mode === 'upper_body' ? 4 : 8;
+
+  let totalDistance = 0;
+  let usedJointCount = 0;
+
+  for (const id of activeIds) {
+    const p = currentPose[id];
+    const r = referencePose[id];
+    if (!p || !r) continue;
+    totalDistance += Math.hypot(p.x - r.x, p.y - r.y);
+    usedJointCount += 1;
+  }
+
+  const averageDistance = usedJointCount > 0 ? totalDistance / usedJointCount : Number.POSITIVE_INFINITY;
+  const distanceScore = usedJointCount > 0 ? Math.max(0, 1 - averageDistance / 1.2) : 0;
+
+  const handsRaised = Boolean(
+    currentPose[15] && currentPose[16] &&
+    currentPose[11] && currentPose[12] &&
+    currentPose[15]!.y > currentPose[11]!.y &&
+    currentPose[16]!.y > currentPose[12]!.y
+  );
+
+  const rightLegFoldedInward = mode === 'full_body' && Boolean(
+    currentPose[28] && currentPose[26] &&
+    currentPose[28]!.x < currentPose[26]!.x
+  );
+
+  const fallbackBonus =
+    (handsRaised ? FALLBACK_BONUS_PER_RULE : 0) +
+    (rightLegFoldedInward ? FALLBACK_BONUS_PER_RULE : 0);
+
+  const percentage = Math.max(0, Math.min(100, Math.round((distanceScore + fallbackBonus) * 100)));
+  const passed = usedJointCount >= minUsedJoints && percentage >= passThresholdPercent;
+
+  return {
+    percentage,
+    passed,
+    averageDistance,
+    distanceScore,
+    fallbackBonus,
+    usedJointCount,
+    ruleChecks: { handsRaised, rightLegFoldedInward }
+  };
+}
+
+/**
  * Reset the hold timer (call when starting a new round or switching modes).
  */
 export function resetFreezeTimer(): void {

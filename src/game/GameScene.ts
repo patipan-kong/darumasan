@@ -7,9 +7,12 @@ import type { JointId } from "../data/poses";
 import {
   checkFreezeDetection,
   checkPoseMatch,
+  checkPoseMatchNormalized,
   normalizePose,
   resetFreezeTimer,
+  getActiveJointIds,
   type BodyMode,
+  type CoreLandmarkId,
   type FreezeDetectionResult,
   type NormalizedPose,
   type PoseMatchResult,
@@ -22,6 +25,7 @@ const HOLD_DURATION_MS = parseInt(import.meta.env.VITE_HOLD_DURATION_MS ?? "3000
 const MOVEMENT_THRESHOLD = parseFloat(import.meta.env.VITE_MOVEMENT_THRESHOLD ?? "0.045");
 const MOVEMENT_SMOOTHING_ALPHA = parseFloat(import.meta.env.VITE_MOVEMENT_SMOOTHING_ALPHA ?? "0.2");
 const LOWER_BODY_AUTO_WARN_MS = 2000;
+const SELF_MATCH_DEBUG_INTERVAL_MS = 1000;
 
 enum GameState {
   WAITING,
@@ -32,7 +36,6 @@ enum GameState {
 
 const FULL_BODY_LANDMARKS = [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28] as const satisfies readonly JointId[];
 
-// Full body skeleton connections (absolute landmark indices)
 const FULL_BODY_CONNECTIONS: Array<[number, number]> = [
   [11, 12],
   [11, 13], [13, 15],
@@ -43,14 +46,12 @@ const FULL_BODY_CONNECTIONS: Array<[number, number]> = [
   [24, 26], [26, 28],
 ];
 
-// Upper body skeleton connections (absolute landmark indices)
 const UPPER_BODY_CONNECTIONS: Array<[number, number]> = [
   [11, 12],
   [11, 13], [13, 15],
   [12, 14], [14, 16],
 ];
 
-// Full body reference silhouette connections (indices into FULL_BODY_LANDMARKS array)
 const FULL_BODY_CORE_CONNECTIONS: Array<[number, number]> = [
   [0, 1],
   [0, 2], [2, 4],
@@ -61,7 +62,6 @@ const FULL_BODY_CORE_CONNECTIONS: Array<[number, number]> = [
   [7, 9], [9, 11],
 ];
 
-// Upper body reference silhouette connections (indices into UPPER_BODY_LANDMARK_IDS array)
 const UPPER_BODY_CORE_CONNECTIONS: Array<[number, number]> = [
   [0, 1],
   [0, 2], [2, 4],
@@ -97,6 +97,12 @@ export class GameScene extends Phaser.Scene {
   private lowerBodyNotVisibleMs = 0;
   private modeToggleBtn: HTMLButtonElement | null = null;
 
+  // Self-match test state
+  private capturedSelfPose: NormalizedPose | null = null;
+  private currentNormalizedPose: NormalizedPose | null = null;
+  private selfMatchBtn: HTMLButtonElement | null = null;
+  private selfMatchDebugLastMs = -Infinity;
+
   constructor() {
     super("GameScene");
     this.poseTracker = new PoseTracker();
@@ -114,6 +120,7 @@ export class GameScene extends Phaser.Scene {
       .setDepth(1);
 
     this.modeToggleBtn = this.createModeToggleButton();
+    this.selfMatchBtn = this.createSelfMatchButton();
 
     try {
       await this.poseTracker.init();
@@ -126,27 +133,22 @@ export class GameScene extends Phaser.Scene {
       this.poseTracker.dispose();
       this.modeToggleBtn?.remove();
       this.modeToggleBtn = null;
+      this.selfMatchBtn?.remove();
+      this.selfMatchBtn = null;
     });
   }
+
+  // ─── Mode toggle ───────────────────────────────────────────────────────────
 
   private createModeToggleButton(): HTMLButtonElement {
     const btn = document.createElement('button');
     btn.textContent = 'Upper Body Mode';
-    btn.style.cssText = [
-      'position: fixed',
-      'top: 16px',
-      'right: 16px',
-      'z-index: 1000',
-      'padding: 9px 16px',
-      'background: rgba(10, 20, 45, 0.88)',
-      'color: #4dffb8',
-      'border: 2px solid #4dffb8',
-      'border-radius: 7px',
-      'font-family: Consolas, monospace',
-      'font-size: 15px',
-      'cursor: pointer',
-      'letter-spacing: 0.03em',
-    ].join(';');
+    Object.assign(btn.style, {
+      position: 'fixed', top: '16px', right: '16px', zIndex: '1000',
+      padding: '9px 16px', background: 'rgba(10,20,45,0.88)',
+      color: '#4dffb8', border: '2px solid #4dffb8', borderRadius: '7px',
+      fontFamily: 'Consolas, monospace', fontSize: '15px', cursor: 'pointer',
+    });
     btn.addEventListener('mouseenter', () => { btn.style.background = 'rgba(30,60,90,0.95)'; });
     btn.addEventListener('mouseleave', () => { btn.style.background = 'rgba(10,20,45,0.88)'; });
     btn.addEventListener('click', () => this.toggleBodyMode());
@@ -159,6 +161,12 @@ export class GameScene extends Phaser.Scene {
     this.lowerBodyNotVisibleMs = 0;
     resetFreezeTimer();
     this.previousNormalizedPose = null;
+    this.currentNormalizedPose = null;
+    // Invalidate self-match when mode changes — coordinate spaces differ
+    if (this.capturedSelfPose !== null) {
+      this.capturedSelfPose = null;
+      this.updateSelfMatchButton();
+    }
     this.updateModeButton();
     this.statusText?.setMode(
       this.bodyMode === 'full_body' ? 'FULL BODY' : 'UPPER BODY',
@@ -174,6 +182,77 @@ export class GameScene extends Phaser.Scene {
     this.modeToggleBtn.style.color = isUpper ? '#ffcc44' : '#4dffb8';
     this.modeToggleBtn.style.borderColor = isUpper ? '#ffcc44' : '#4dffb8';
   }
+
+  // ─── Self-match capture ────────────────────────────────────────────────────
+
+  private createSelfMatchButton(): HTMLButtonElement {
+    const btn = document.createElement('button');
+    btn.textContent = 'Capture Pose As Reference';
+    Object.assign(btn.style, {
+      position: 'fixed', top: '60px', right: '16px', zIndex: '1000',
+      padding: '9px 16px', background: 'rgba(10,20,45,0.88)',
+      color: '#ffaa44', border: '2px solid #ffaa44', borderRadius: '7px',
+      fontFamily: 'Consolas, monospace', fontSize: '15px', cursor: 'pointer',
+    });
+    btn.addEventListener('mouseenter', () => { btn.style.background = 'rgba(50,30,10,0.95)'; });
+    btn.addEventListener('mouseleave', () => { btn.style.background = 'rgba(10,20,45,0.88)'; });
+    btn.addEventListener('click', () => this.captureSelfPose());
+    document.body.appendChild(btn);
+    return btn;
+  }
+
+  private captureSelfPose(): void {
+    // Toggle off
+    if (this.capturedSelfPose !== null) {
+      this.capturedSelfPose = null;
+      this.selfMatchDebugLastMs = -Infinity;
+      this.updateSelfMatchButton();
+      this.statusText?.setMode(
+        this.bodyMode === 'full_body' ? 'FULL BODY' : 'UPPER BODY',
+        this.bodyMode === 'upper_body'
+      );
+      console.log('[SelfMatch] Cleared — reverted to authored reference pose.');
+      return;
+    }
+
+    if (!this.currentNormalizedPose || Object.keys(this.currentNormalizedPose).length === 0) {
+      console.warn('[SelfMatch] No reliable pose detected yet. Stand in frame first.');
+      return;
+    }
+
+    // Deep copy
+    const copy: NormalizedPose = {};
+    for (const [key, val] of Object.entries(this.currentNormalizedPose) as [string, { x: number; y: number }][]) {
+      const id = Number(key) as CoreLandmarkId;
+      copy[id] = { x: val.x, y: val.y };
+    }
+
+    this.capturedSelfPose = copy;
+    this.selfMatchDebugLastMs = -Infinity;
+    this.updateSelfMatchButton();
+    this.statusText?.setMode('SELF-MATCH', true);
+
+    const activeIds = getActiveJointIds(this.bodyMode);
+    const capturedCount = activeIds.filter(id => copy[id]).length;
+    console.group('[SelfMatch] Pose captured — expect 95-100% score without moving');
+    console.log(`Mode: ${this.bodyMode} | Active joints captured: ${capturedCount}/${activeIds.length}`);
+    console.log('Captured joint positions:');
+    for (const id of activeIds) {
+      const v = copy[id];
+      console.log(`  joint ${id}: ${v ? `x=${v.x.toFixed(4)}, y=${v.y.toFixed(4)}` : 'MISSING'}`);
+    }
+    console.groupEnd();
+  }
+
+  private updateSelfMatchButton(): void {
+    if (!this.selfMatchBtn) return;
+    const active = this.capturedSelfPose !== null;
+    this.selfMatchBtn.textContent = active ? 'Clear Self-Match' : 'Capture Pose As Reference';
+    this.selfMatchBtn.style.color = active ? '#ff6666' : '#ffaa44';
+    this.selfMatchBtn.style.borderColor = active ? '#ff6666' : '#ffaa44';
+  }
+
+  // ─── Main update ───────────────────────────────────────────────────────────
 
   public update(time: number, delta: number): void {
     if (!this.statusText || !this.webcamTexture || !this.overlayGraphics) return;
@@ -199,7 +278,6 @@ export class GameScene extends Phaser.Scene {
     };
 
     if (hasPose) {
-      // Auto-detect lower body visibility for full body mode suggestion
       this.updateLowerBodyAutoDetect(landmarks, delta);
 
       const normalized = normalizePose(landmarks, this.bodyMode);
@@ -208,7 +286,22 @@ export class GameScene extends Phaser.Scene {
       this.lastNormalizeReliable = normalizeReliable;
 
       if (normalizeReliable) {
-        matchResult = checkPoseMatch(normalized.pose, REFERENCE_POSE, POSE_MATCH_THRESHOLD_PERCENT, this.bodyMode);
+        this.currentNormalizedPose = normalized.pose;
+
+        if (this.capturedSelfPose !== null) {
+          matchResult = checkPoseMatchNormalized(
+            normalized.pose, this.capturedSelfPose,
+            POSE_MATCH_THRESHOLD_PERCENT, this.bodyMode
+          );
+          // Debug report when score stays unexpectedly low
+          if (matchResult.percentage < 90 && time - this.selfMatchDebugLastMs > SELF_MATCH_DEBUG_INTERVAL_MS) {
+            this.selfMatchDebugLastMs = time;
+            this.printSelfMatchDebug(normalized.pose, matchResult);
+          }
+        } else {
+          matchResult = checkPoseMatch(normalized.pose, REFERENCE_POSE, POSE_MATCH_THRESHOLD_PERCENT, this.bodyMode);
+        }
+
         this.lastUsedJointCount = matchResult.usedJointCount;
         this.lastFreezeResult = checkFreezeDetection(normalized.pose, this.previousNormalizedPose, delta, {
           poseMatched: matchResult.passed,
@@ -222,30 +315,21 @@ export class GameScene extends Phaser.Scene {
         this.previousNormalizedPose = null;
         this.lastUsedJointCount = 0;
         this.lastFreezeResult = {
-          movementScore: 0,
-          foul: false,
-          message: "LANDMARK LOW VISIBILITY",
-          holdTimeMs: 0,
-          holdProgress: 0,
-          passed: false,
-          comparedJointCount: 0
+          movementScore: 0, foul: false, message: "LANDMARK LOW VISIBILITY",
+          holdTimeMs: 0, holdProgress: 0, passed: false, comparedJointCount: 0
         };
       }
     } else {
       resetFreezeTimer();
       this.previousNormalizedPose = null;
+      this.currentNormalizedPose = null;
       this.lastVisibleJointCount = 0;
       this.lastUsedJointCount = 0;
       this.lastNormalizeReliable = false;
       this.lowerBodyNotVisibleMs = 0;
       this.lastFreezeResult = {
-        movementScore: 0,
-        foul: false,
-        message: "NO POSE DETECTED",
-        holdTimeMs: 0,
-        holdProgress: 0,
-        passed: false,
-        comparedJointCount: 0
+        movementScore: 0, foul: false, message: "NO POSE DETECTED",
+        holdTimeMs: 0, holdProgress: 0, passed: false, comparedJointCount: 0
       };
     }
 
@@ -263,6 +347,8 @@ export class GameScene extends Phaser.Scene {
     this.drawOverlay(landmarks);
     this.advanceStateMachine(time, hasPose, normalizeReliable);
   }
+
+  // ─── Lower-body auto-detect ────────────────────────────────────────────────
 
   private updateLowerBodyAutoDetect(landmarks: Landmark[], delta: number): void {
     if (!this.statusText) return;
@@ -287,6 +373,8 @@ export class GameScene extends Phaser.Scene {
       }
     }
   }
+
+  // ─── State machine ────────────────────────────────────────────────────────
 
   private advanceStateMachine(time: number, hasPose: boolean, normalizeReliable: boolean): void {
     if (!this.statusText) return;
@@ -315,11 +403,13 @@ export class GameScene extends Phaser.Scene {
         this.enterPosing(time);
         break;
 
-      case GameState.POSING:
-        this.statusText.setCenterMessage(`MATCH: ${REFERENCE_POSE.name}`, "#4dffb8");
+      case GameState.POSING: {
+        const refLabel = this.capturedSelfPose !== null ? 'SELF-MATCH REF' : REFERENCE_POSE.name;
+        this.statusText.setCenterMessage(`MATCH: ${refLabel}`, "#4dffb8");
         this.statusText.setHoldTime(0, HOLD_DURATION_MS / 1000);
         if (this.lastMatchPercent >= POSE_MATCH_THRESHOLD_PERCENT) this.enterHolding(time);
         break;
+      }
 
       case GameState.HOLDING:
         if (this.lastFreezeResult.foul) {
@@ -359,6 +449,8 @@ export class GameScene extends Phaser.Scene {
     this.playSuccessBeep();
   }
 
+  // ─── Rendering ────────────────────────────────────────────────────────────
+
   private drawWebcamFrame(): void {
     if (!this.webcamTexture) return;
     const video = this.poseTracker.getVideoElement();
@@ -378,7 +470,8 @@ export class GameScene extends Phaser.Scene {
   private drawOverlay(landmarks: Landmark[]): void {
     if (!this.overlayGraphics) return;
     this.overlayGraphics.clear();
-    this.drawReferenceSilhouette();
+    // In self-match mode there is no static reference pose to ghost — skip silhouette
+    if (this.capturedSelfPose === null) this.drawReferenceSilhouette();
     if (landmarks.length > 0) this.drawPlayerSkeleton(landmarks);
   }
 
@@ -452,6 +545,71 @@ export class GameScene extends Phaser.Scene {
       );
     }
   }
+
+  // ─── Self-match diagnostics ───────────────────────────────────────────────
+
+  private printSelfMatchDebug(currentPose: NormalizedPose, matchResult: PoseMatchResult): void {
+    if (!this.capturedSelfPose) return;
+
+    const activeIds = getActiveJointIds(this.bodyMode);
+
+    console.group(
+      `%c[SelfMatch] Score ${matchResult.percentage}% — BELOW 90%`,
+      'color: #ff6644; font-weight: bold'
+    );
+
+    console.log('%cReference pose (captured):', 'color: #88aaff; font-weight: bold');
+    for (const id of activeIds) {
+      const r = this.capturedSelfPose[id];
+      console.log(`  joint ${id}: ${r ? `x=${r.x.toFixed(5)}, y=${r.y.toFixed(5)}` : '⚠ MISSING'}`);
+    }
+
+    console.log('%cCurrent pose:', 'color: #88ffaa; font-weight: bold');
+    for (const id of activeIds) {
+      const p = currentPose[id];
+      console.log(`  joint ${id}: ${p ? `x=${p.x.toFixed(5)}, y=${p.y.toFixed(5)}` : '⚠ MISSING'}`);
+    }
+
+    console.log('%cPer-joint distances (current vs reference):', 'color: #ffdd88; font-weight: bold');
+    for (const id of activeIds) {
+      const p = currentPose[id];
+      const r = this.capturedSelfPose[id];
+      if (p && r) {
+        const d = Math.hypot(p.x - r.x, p.y - r.y);
+        const flag = d > 0.05 ? ' ⚠ large' : '';
+        console.log(`  joint ${id}: ${d.toFixed(5)}${flag}`);
+      } else {
+        console.log(`  joint ${id}: SKIPPED — ${!p ? 'current missing' : 'reference missing'}`);
+      }
+    }
+
+    const minUsed = this.bodyMode === 'upper_body' ? 4 : 8;
+    console.log('%cDiagnosis:', 'color: #ff88aa; font-weight: bold');
+    console.log(`  avgDistance    : ${matchResult.averageDistance.toFixed(5)}`);
+    console.log(`  distanceScore  : ${matchResult.distanceScore.toFixed(5)}  (raw, before bonus)`);
+    console.log(`  fallbackBonus  : +${(matchResult.fallbackBonus * 100).toFixed(1)}%`);
+    console.log(`  usedJoints     : ${matchResult.usedJointCount} / ${activeIds.length}  (need ≥${minUsed})`);
+    console.log(`  finalPercent   : ${matchResult.percentage}%`);
+
+    if (matchResult.usedJointCount < minUsed) {
+      console.error(`  ✗ FAIL: only ${matchResult.usedJointCount} joints matched — need ${minUsed}.`);
+      console.error('    → Some joints present in reference but absent in current pose (or vice versa).');
+      console.error('    → Check visibility thresholds in normalizePose().');
+    } else if (matchResult.averageDistance > 0.05) {
+      console.error(`  ✗ FAIL: high average distance ${matchResult.averageDistance.toFixed(4)} despite same pose.`);
+      console.error('    → Normalization anchor (hip/shoulder midpoint) is shifting between frames.');
+      console.error('    → May indicate large camera noise or unstable body position.');
+    } else if (matchResult.distanceScore < 0.9) {
+      console.error(`  ✗ FAIL: distanceScore=${matchResult.distanceScore.toFixed(4)} maps to < 90%.`);
+      console.error('    → 1 - avgDist/1.2 formula is too strict for this distance. Review the divisor (1.2).');
+    } else {
+      console.warn('  ? Score below 90% but no clear single cause. Check fallbackBonus and threshold values.');
+    }
+
+    console.groupEnd();
+  }
+
+  // ─── Audio ────────────────────────────────────────────────────────────────
 
   private playSuccessBeep(): void {
     const AudioCtx = window.AudioContext ||
