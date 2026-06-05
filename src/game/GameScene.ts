@@ -3,7 +3,9 @@ import { MotionDetector } from "../systems/MotionDetector";
 import type { Landmark } from "../systems/MotionDetector";
 import { StatusText } from "../ui/StatusText";
 import { PoseTracker } from "../vision/PoseTracker";
-import gameConfig from "../game.config.json";
+
+const MOTION_THRESHOLD = parseFloat(import.meta.env.VITE_MOTION_THRESHOLD ?? "0.05");
+const RED_LIGHT_DURATION_MS = parseInt(import.meta.env.VITE_RED_LIGHT_DURATION_MS ?? "3000", 10);
 
 enum GameState {
   WAITING,
@@ -14,8 +16,6 @@ enum GameState {
 }
 
 const SKELETON_CONNECTIONS: Array<[number, number]> = [
-  [0, 11],
-  [0, 12],
   [11, 12],
   [11, 13],
   [13, 15],
@@ -30,7 +30,8 @@ const SKELETON_CONNECTIONS: Array<[number, number]> = [
   [26, 28]
 ];
 
-const DEBUG_KEYPOINTS = [0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28];
+const CORE_LANDMARKS = [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28];
+const DEBUG_KEYPOINTS = CORE_LANDMARKS;
 
 export class GameScene extends Phaser.Scene {
   private poseTracker: PoseTracker;
@@ -42,7 +43,7 @@ export class GameScene extends Phaser.Scene {
   private overlayGraphics: Phaser.GameObjects.Graphics | null = null;
   private freezeTimerMs = 0;
   private lastMovementScore = 0;
-  private redLightDurationMs = gameConfig.redLightDurationMs;
+  private redLightDurationMs = RED_LIGHT_DURATION_MS;
   private greenLightDurationMs = 0;
   private lastPoseUpdateMs = 0;
   private stateChangedAtMs = 0;
@@ -50,7 +51,7 @@ export class GameScene extends Phaser.Scene {
   constructor() {
     super("GameScene");
     this.poseTracker = new PoseTracker();
-    this.motionDetector = new MotionDetector(gameConfig.motionThreshold);
+    this.motionDetector = new MotionDetector(MOTION_THRESHOLD);
   }
 
   public async create(): Promise<void> {
@@ -95,7 +96,8 @@ export class GameScene extends Phaser.Scene {
 
     let isStill = true;
     if (landmarks.length > 0) {
-      const motion = this.motionDetector.analyze(landmarks);
+      const coreLandmarks = CORE_LANDMARKS.map(i => landmarks[i]);
+      const motion = this.motionDetector.analyze(coreLandmarks);
       this.lastMovementScore = motion.movementScore;
       isStill = motion.isStill;
     } else {
