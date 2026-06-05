@@ -3,6 +3,7 @@ import { MotionDetector } from "../systems/MotionDetector";
 import type { Landmark } from "../systems/MotionDetector";
 import { StatusText } from "../ui/StatusText";
 import { PoseTracker } from "../vision/PoseTracker";
+import gameConfig from "../game.config.json";
 
 enum GameState {
   WAITING,
@@ -49,7 +50,7 @@ export class GameScene extends Phaser.Scene {
   constructor() {
     super("GameScene");
     this.poseTracker = new PoseTracker();
-    this.motionDetector = new MotionDetector(0.05);
+    this.motionDetector = new MotionDetector(gameConfig.motionThreshold);
   }
 
   public async create(): Promise<void> {
